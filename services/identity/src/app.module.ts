@@ -40,6 +40,7 @@ import { RecruiterModule } from './recruiter/recruiter.module';
 import { LmsModule } from './lms/lms.module';
 import { ObeModule } from './obe/obe.module';
 import { BulkImportModule } from './bulk-import/bulk-import.module';
+import { GamificationModule } from './gamification/gamification.module';
 import { RevisionModule } from './revision/revision.module';
 import { FeatureStoreModule } from './feature-store/feature-store.module';
 import { PredictionModule } from './prediction/prediction.module';
@@ -90,6 +91,7 @@ import { TransportModule } from './transport/transport.module';
     LmsModule,
     ObeModule,
     RevisionModule,
+    GamificationModule,
     BulkImportModule,
     // Phase 0 — shared AI foundation (feature store + prediction engine)
     FeatureStoreModule,
