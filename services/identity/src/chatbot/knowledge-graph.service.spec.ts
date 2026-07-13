@@ -84,11 +84,14 @@ describe('KnowledgeGraphService', () => {
       expect(Array.isArray(graph.todaySchedule)).toBe(true);
     });
 
-    it('returns empty graph when db is null', async () => {
+    it('returns demo fallback graph when db is null', async () => {
       const svcNoDb = new KnowledgeGraphService(null);
       const graph = await svcNoDb.buildStudentGraph('1RV21CS001');
       expect(graph.role).toBe('STUDENT');
-      expect(graph.name).toBe('Unknown');
+      // No DB → demo-rich fallback so the assistant can still answer core
+      // questions (schedule/fees/attendance) instead of "I don't have that".
+      expect(graph.name).toBe('Demo Student');
+      expect(Object.keys(graph.weekSchedule).length).toBeGreaterThan(0);
     });
 
     it('sets detentionRisk when any subject below 75%', async () => {
@@ -176,11 +179,11 @@ describe('KnowledgeGraphService', () => {
       await expect(svc.buildParentGraph('+91000')).rejects.toThrow('Parent not found');
     });
 
-    it('returns empty parent graph when db is null', async () => {
+    it('returns demo fallback parent graph when db is null', async () => {
       const svcNoDb = new KnowledgeGraphService(null);
       const graph = await svcNoDb.buildParentGraph('+91000');
       expect(graph.role).toBe('PARENT');
-      expect(graph.child.name).toBe('Unknown');
+      expect(graph.child.name).toBe('Demo Student');
     });
 
     it('falls back to demo USN when identifier is the seed parent UUID and DB lookups miss', async () => {
@@ -199,7 +202,7 @@ describe('KnowledgeGraphService', () => {
 
   // ---------------------------------------------------------------------------
   // withTimeout() — the setTimeout callback fires when the DB query hangs
-  // longer than GRAPH_TIMEOUT_MS (5000ms). Fake timers let us simulate this.
+  // longer than GRAPH_TIMEOUT_MS (12000ms). Fake timers let us simulate this.
   // ---------------------------------------------------------------------------
   describe('withTimeout() — timeout fires and returns fallback (line 68 setTimeout callback)', () => {
     beforeEach(() => {
@@ -209,42 +212,42 @@ describe('KnowledgeGraphService', () => {
       jest.useRealTimers();
     });
 
-    it('returns fallback student graph when DB query exceeds 5-second timeout', async () => {
+    it('returns fallback student graph when DB query exceeds the timeout', async () => {
       // DB query hangs indefinitely — never resolves
       mockQuery.mockReturnValue(new Promise(() => {}));
 
       const graphPromise = svc.buildStudentGraph('1RV21CS001');
 
-      // Advance fake timers past GRAPH_TIMEOUT_MS (5000ms) so the setTimeout
+      // Advance fake timers past GRAPH_TIMEOUT_MS (12000ms) so the setTimeout
       // callback fires, resolving the timeout promise with the fallback.
-      jest.advanceTimersByTime(5001);
+      jest.advanceTimersByTime(12001);
 
       const graph = await graphPromise;
-      // Fallback emptyStudentGraph is returned
-      expect(graph.name).toBe('Unknown');
+      // Demo-rich fallback is returned (not an empty graph)
+      expect(graph.name).toBe('Demo Student');
       expect(graph.role).toBe('STUDENT');
     });
 
-    it('returns fallback teacher graph when DB query exceeds 5-second timeout', async () => {
+    it('returns fallback teacher graph when DB query exceeds the timeout', async () => {
       mockQuery.mockReturnValue(new Promise(() => {}));
 
       const graphPromise = svc.buildTeacherGraph('FAC001');
-      jest.advanceTimersByTime(5001);
+      jest.advanceTimersByTime(12001);
 
       const graph = await graphPromise;
       expect(graph.name).toBe('Unknown');
       expect(graph.role).toBe('TEACHER');
     });
 
-    it('returns fallback parent graph when DB query exceeds 5-second timeout', async () => {
+    it('returns fallback parent graph when DB query exceeds the timeout', async () => {
       mockQuery.mockReturnValue(new Promise(() => {}));
 
       const graphPromise = svc.buildParentGraph('+919845012345');
-      jest.advanceTimersByTime(5001);
+      jest.advanceTimersByTime(12001);
 
       const graph = await graphPromise;
       expect(graph.role).toBe('PARENT');
-      expect(graph.child.name).toBe('Unknown');
+      expect(graph.child.name).toBe('Demo Student');
     });
   });
 
@@ -1012,7 +1015,7 @@ describe('KnowledgeGraphService', () => {
       try {
         mockQuery.mockReturnValue(new Promise(() => {})); // never resolves
         const p = svc.buildAdminGraph('PRINCIPAL01');
-        jest.advanceTimersByTime(5001);
+        jest.advanceTimersByTime(12001);
         const graph = await p;
         expect(graph.role).toBe('ADMIN');
         expect(graph.name).toBe('Administrator');

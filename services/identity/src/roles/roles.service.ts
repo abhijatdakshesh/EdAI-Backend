@@ -20,6 +20,7 @@ export class RolesService {
     { name: 'TRUSTEE', permissions: ['analytics:read', 'reports:read'] },
     { name: 'RECRUITER', permissions: ['placements:read', 'placements:write'] },
     { name: 'APPLICANT', permissions: ['admissions:read:self', 'admissions:write:self'] },
+    { name: 'DRIVER', permissions: ['transport:location:write'] },
   ];
 
   findAll(): RoleDefinition[] {
