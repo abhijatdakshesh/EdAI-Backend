@@ -643,6 +643,37 @@ describe('CommsService', () => {
       spy.mockRestore();
     });
 
+    // ── AI→human live transfer (handoff) ──────────────────────────────────────
+    it('transfers to agent (<Dial><Number>) when caller asks for a human and agent phone is set', async () => {
+      process.env['SUPPORT_AGENT_PHONE'] = '+919900000000';
+      const xml = await svc.handleTurn('call-X', 'can you connect me to a human');
+      expect(xml).toContain('<Dial');
+      expect(xml).toContain('<Number>+919900000000</Number>');
+      expect(xml).toContain('/transfer-result');
+      // a system "Transfer→human" turn is recorded
+      const aiTurn = events.emitAiCallTurn.mock.calls
+        .map((c) => c[0])
+        .find((c) => c.role === 'AI' && /Transfer/i.test(c.text));
+      expect(aiTurn).toBeTruthy();
+      delete process.env['SUPPORT_AGENT_PHONE'];
+    });
+
+    it('falls back to goodbye/hangup on human request when no agent phone configured', async () => {
+      delete process.env['SUPPORT_AGENT_PHONE'];
+      const xml = await svc.handleTurn('call-X', 'I want to talk to a representative');
+      expect(xml).toContain('<Hangup');
+      expect(xml).not.toContain('<Dial');
+    });
+
+    it('finalizeTransfer: completed → bare hangup; no-answer → fallback message + hangup', async () => {
+      const completed = await svc.finalizeTransfer('call-X', 'completed', 42);
+      expect(completed).toContain('<Hangup');
+      expect(completed).not.toContain('<Say');
+      const failed = await svc.finalizeTransfer('call-X', 'no-answer');
+      expect(failed).toContain('<Say');
+      expect(failed).toContain('<Hangup');
+    });
+
     // ── BCP47 Gather tag for all new regional languages ───────────────────────
     describe.each([
       { lang: 'mr', tag: 'mr-IN' },

@@ -9,7 +9,8 @@ export type UserRole =
   | 'COUNSELLOR'
   | 'ADMIN'
   | 'RECRUITER'
-  | 'APPLICANT';
+  | 'APPLICANT'
+  | 'DRIVER';
 
 export type Language = 'kn' | 'en' | 'hi' | 'ta' | 'te' | 'ml';
 

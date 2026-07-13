@@ -13,6 +13,11 @@ export class AiCallLogEntity {
   @Column({ nullable: true }) parentPhone!: string;
   @Column({ nullable: true }) transcript!: string;
   @Column({ nullable: true }) summary!: string;
+  // Live-agent handoff (AI→human transfer)
+  @Column({ nullable: true }) transferStatus!: string;
+  @Column({ nullable: true }) transferReason!: string;
+  @Column({ type: 'timestamptz', nullable: true }) transferredAt!: Date;
+  @Column('int', { nullable: true }) transferDuration!: number;
   @CreateDateColumn() calledAt!: Date;
 }
 
