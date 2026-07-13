@@ -16,8 +16,8 @@ describe('RolesService', () => {
   // ─── findAll ────────────────────────────────────────────────────────────────
 
   describe('findAll()', () => {
-    it('returns all 11 role definitions', () => {
-      expect(service.findAll()).toHaveLength(11);
+    it('returns all 12 role definitions', () => {
+      expect(service.findAll()).toHaveLength(12);
     });
 
     it('includes ADMIN role', () => {
@@ -45,7 +45,7 @@ describe('RolesService', () => {
       expect(service.findByName('UNKNOWN' as UserRole)).toBeUndefined();
     });
 
-    const allRoles: UserRole[] = ['ADMIN', 'PRINCIPAL', 'DEAN', 'HOD', 'FACULTY', 'COUNSELLOR', 'PARENT', 'STUDENT', 'TRUSTEE', 'RECRUITER', 'APPLICANT'];
+    const allRoles: UserRole[] = ['ADMIN', 'PRINCIPAL', 'DEAN', 'HOD', 'FACULTY', 'COUNSELLOR', 'PARENT', 'STUDENT', 'TRUSTEE', 'RECRUITER', 'APPLICANT', 'DRIVER'];
     allRoles.forEach((role) => {
       it(`returns definition for ${role}`, () => {
         expect(service.findByName(role)).toBeDefined();
