@@ -40,6 +40,8 @@ import { RecruiterModule } from './recruiter/recruiter.module';
 import { LmsModule } from './lms/lms.module';
 import { ObeModule } from './obe/obe.module';
 import { BulkImportModule } from './bulk-import/bulk-import.module';
+import { FeatureStoreModule } from './feature-store/feature-store.module';
+import { PredictionModule } from './prediction/prediction.module';
 
 @Module({
   imports: [
@@ -85,6 +87,9 @@ import { BulkImportModule } from './bulk-import/bulk-import.module';
     LmsModule,
     ObeModule,
     BulkImportModule,
+    // Phase 0 — shared AI foundation (feature store + prediction engine)
+    FeatureStoreModule,
+    PredictionModule,
     // Seed (must be last — imports all domain modules)
     SeedModule,
   ],
