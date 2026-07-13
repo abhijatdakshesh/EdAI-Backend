@@ -83,6 +83,18 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
     this.emitToInstitution(payload.institutionId ?? 'default', 'ai-call:turn', payload);
   }
 
+  /** Live bus GPS ping — broadcast to institution subscribers of the route. */
+  emitBusLocation(payload: {
+    routeId: string;
+    lat: number;
+    lng: number;
+    speedKmph: number | null;
+    recordedAt: string;
+    institutionId?: string;
+  }): void {
+    this.emitToInstitution(payload.institutionId ?? 'default', 'bus:location', payload);
+  }
+
   emitVtuWindowOpened(payload: { windowId: string; title: string; institutionId?: string }): void {
     this.emitToInstitution(payload.institutionId ?? 'default', 'vtu:window-opened', payload);
   }

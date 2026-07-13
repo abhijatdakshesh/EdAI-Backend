@@ -42,6 +42,8 @@ import { ObeModule } from './obe/obe.module';
 import { BulkImportModule } from './bulk-import/bulk-import.module';
 import { FeatureStoreModule } from './feature-store/feature-store.module';
 import { PredictionModule } from './prediction/prediction.module';
+import { HostelModule } from './hostel/hostel.module';
+import { TransportModule } from './transport/transport.module';
 
 @Module({
   imports: [
@@ -90,6 +92,9 @@ import { PredictionModule } from './prediction/prediction.module';
     // Phase 0 — shared AI foundation (feature store + prediction engine)
     FeatureStoreModule,
     PredictionModule,
+    // Campus services — hostel management + bus transportation
+    HostelModule,
+    TransportModule,
     // Seed (must be last — imports all domain modules)
     SeedModule,
   ],
