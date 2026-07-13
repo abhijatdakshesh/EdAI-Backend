@@ -39,6 +39,8 @@ import { PlacementModule } from './placement/placement.module';
 import { RecruiterModule } from './recruiter/recruiter.module';
 import { LmsModule } from './lms/lms.module';
 import { BulkImportModule } from './bulk-import/bulk-import.module';
+import { HostelModule } from './hostel/hostel.module';
+import { TransportModule } from './transport/transport.module';
 
 @Module({
   imports: [
@@ -83,6 +85,9 @@ import { BulkImportModule } from './bulk-import/bulk-import.module';
     RecruiterModule,
     LmsModule,
     BulkImportModule,
+    // Campus services — hostel management + bus transportation
+    HostelModule,
+    TransportModule,
     // Seed (must be last — imports all domain modules)
     SeedModule,
   ],
