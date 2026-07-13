@@ -48,12 +48,11 @@ export class TransportController {
   }
 
   /**
-   * GPS ingest from the on-bus device (authenticates as an admin principal for
-   * now; a dedicated DRIVER role is a follow-up). Emits over WebSocket for live
-   * maps.
+   * GPS ingest from the on-bus device (authenticates as a DRIVER principal;
+   * ADMIN/PRINCIPAL allowed for ops/testing). Emits over WebSocket for live maps.
    */
   @Post('routes/:id/location')
-  @Roles('ADMIN', 'PRINCIPAL')
+  @Roles('ADMIN', 'PRINCIPAL', 'DRIVER')
   recordLocation(@Param('id') id: string, @Body() body: LocationDto) {
     if (typeof body?.lat !== 'number' || typeof body?.lng !== 'number') {
       throw new BadRequestException('lat and lng are required numbers');
