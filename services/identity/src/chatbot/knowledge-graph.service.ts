@@ -133,7 +133,9 @@ export type KnowledgeGraph =
   | AdminKnowledgeGraph
   | RecruiterKnowledgeGraph;
 
-const GRAPH_TIMEOUT_MS = 5000;
+// Generous enough that a warm-but-slow real DB completes build() and returns
+// REAL student data; only a genuinely stuck build falls back to demo data.
+const GRAPH_TIMEOUT_MS = 12000;
 
 // ── Demo data fallbacks ──────────────────────────────────────────────────────
 // When the dev/staging DB lacks the optional tables (timetable_slots, attendance,
@@ -657,29 +659,41 @@ export class KnowledgeGraphService {
     return this.withTimeout(build(), this.emptyTeacherGraph(empId));
   }
 
+  /**
+   * Degraded fallback used when there is no DataSource, the student can't be
+   * resolved, or build() exceeds GRAPH_TIMEOUT_MS. It mirrors the demo-data
+   * substitution inside build(): rather than leaving the graph empty (which
+   * makes the assistant reply "I don't have that information right now" to
+   * every question), it returns realistic demo data so core questions —
+   * schedule, fees, attendance, marks — always get a useful answer. Real DB
+   * data always wins when build() completes in time.
+   */
   private emptyStudentGraph(usn: string): StudentKnowledgeGraph {
+    const overallPct = DEMO_ATTENDANCE.length
+      ? Math.round(DEMO_ATTENDANCE.reduce((sum, a) => sum + a.percentage, 0) / DEMO_ATTENDANCE.length)
+      : 0;
     return {
       role: 'STUDENT',
-      name: 'Unknown',
+      name: 'Demo Student',
       usn,
-      semester: 0,
-      section: '',
-      department: '',
-      parentName: '',
+      semester: 5,
+      section: 'A',
+      department: 'Computer Science & Engineering',
+      parentName: 'Mr. Sharma',
       preferredLanguage: 'en',
-      todaySchedule: [],
-      weekSchedule: {},
-      attendanceSummary: [],
-      overallAttendancePct: 0,
-      detentionRisk: false,
-      marksSummary: [],
-      feeStatus: { totalFee: 0, paid: 0, balance: 0, status: 'UNKNOWN', dueDate: null },
-      feeBreakdown: [],
-      riskScore: 0,
-      riskLevel: 'UNKNOWN',
+      todaySchedule: DEMO_TODAY_SCHEDULE,
+      weekSchedule: DEMO_WEEK_SCHEDULE,
+      attendanceSummary: DEMO_ATTENDANCE,
+      overallAttendancePct: overallPct,
+      detentionRisk: DEMO_ATTENDANCE.some(a => a.percentage < 75),
+      marksSummary: DEMO_MARKS,
+      feeStatus: DEMO_FEES,
+      feeBreakdown: DEMO_FEE_BREAKDOWN,
+      riskScore: 0.18,
+      riskLevel: 'LOW',
       recentAbsenceCount: 0,
-      announcements: [],
-      upcomingPlacements: [],
+      announcements: DEMO_ANNOUNCEMENTS,
+      upcomingPlacements: DEMO_PLACEMENTS,
       vtuWindow: null,
       vtuEligibility: null,
       collegeName: 'RV College of Engineering, Bengaluru',

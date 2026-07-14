@@ -4,7 +4,7 @@ import { Repository } from 'typeorm';
 import { createHmac, randomUUID } from 'node:crypto';
 import { EventsGateway } from '../events/events.gateway';
 import { ConsentService } from './consent.service';
-import { ConversationStateService, Turn } from './conversation-state.service';
+import { ConversationStateService, ConversationState, Turn } from './conversation-state.service';
 import { KnowledgeGraphService } from '../chatbot/knowledge-graph.service';
 import { geminiGenerate, GEMINI_FAST } from '../shared/gemini-ai';
 import { AiCallLogEntity, AnnouncementEntity } from '../entities/comms.entity';
@@ -13,6 +13,26 @@ import {
   isTwilioWebhookReachable,
   resolveTwilioWebhookBase,
 } from './twilio-webhook.util';
+import { waitUntil } from '@vercel/functions';
+
+/**
+ * Keep a fire-and-forget promise alive past the HTTP response.
+ *
+ * On Vercel (Fluid Compute) the function instance is frozen as soon as the
+ * response is sent, so a detached `void promise` (e.g. the outbound Twilio
+ * dispatch) never runs — this is why AI calls silently failed on serverless.
+ * `waitUntil()` registers the promise with the current invocation so it
+ * completes. On non-Vercel/always-on hosts `waitUntil` throws (no context),
+ * so we fall back to a plain detached promise (the event loop stays alive
+ * there anyway).
+ */
+function keepAlive(p: Promise<unknown>): void {
+  try {
+    waitUntil(p);
+  } catch {
+    void Promise.resolve(p).catch(() => undefined);
+  }
+}
 
 export interface AICallLog {
   id: string;
@@ -29,6 +49,11 @@ export interface AICallLog {
   parentPhone?: string;
   language?: string;
   callType?: string;
+  // Live-agent handoff (AI→human transfer)
+  transferStatus?: 'PENDING' | 'CONNECTED' | 'FAILED';
+  transferReason?: string;
+  transferredAt?: string;
+  transferDuration?: number;
 }
 
 export interface Announcement {
@@ -68,6 +93,21 @@ const AUDIO_STORE_MAX = 200; // LRU cap; backstop is the 10-min setTimeout TTL
 // Latin alternatives (stop|unsubscribe|cancel|no thanks) need /i; Indic scripts
 // have no concept of case so the /i flag is a no-op for them.
 const STOP_INTENTS = /(stop|unsubscribe|cancel|no thanks|थांबा|বন্ধ|બંધ|നിർത്തുക|ਬੰਦ|ବନ୍ଦ|ಸಾಕು|बंद|रोको|நிறுத்து|ஆபు|ఆపు|वापस)/i;
+// Caller asks to be connected to a human agent → live-agent handoff.
+// EN verbs + human/person/agent/someone synonyms, plus HI/KN equivalents.
+const HUMAN_INTENTS =
+  /(human|real person|agent|representative|operator|counsellor|counselor|customer care|customer support|talk to someone|speak to someone|connect me|transfer me|किसी से बात|इंसान|व्यक्ति|एजेंट|प्रतिनिधि|ಮನುಷ್ಯ|ವ್ಯಕ್ತಿ|ಏಜೆಂಟ್|ಸಿಬ್ಬಂದಿ|ಯಾರಾದರೂ)/i;
+const CONNECTING_BY_LANG: Record<string, string> = {
+  en: 'Sure, let me connect you with our team right away. Please hold.',
+  hi: 'ज़रूर, मैं आपको हमारी टीम से जोड़ता हूँ। कृपया लाइन पर रहें।',
+  kn: 'ಖಂಡಿತ, ನಿಮ್ಮನ್ನು ನಮ್ಮ ತಂಡಕ್ಕೆ ಸಂಪರ್ಕಿಸುತ್ತೇನೆ. ದಯವಿಟ್ಟು ಕಾಯಿರಿ.',
+};
+// Played if the agent leg fails / no answer.
+const TRANSFER_FALLBACK_BY_LANG: Record<string, string> = {
+  en: 'Our team is busy right now. We will call you back shortly. Thank you.',
+  hi: 'हमारी टीम अभी व्यस्त है। हम आपको शीघ्र ही वापस कॉल करेंगे। धन्यवाद।',
+  kn: 'ನಮ್ಮ ತಂಡ ಈಗ ಕಾರ್ಯನಿರತವಾಗಿದೆ. ನಾವು ಶೀಘ್ರದಲ್ಲೇ ಮರಳಿ ಕರೆ ಮಾಡುತ್ತೇವೆ. ಧನ್ಯವಾದ.',
+};
 const GOODBYE_BY_LANG: Record<string, string> = {
   en: 'Thank you for your time. Goodbye.',
   mr: 'तुमच्या वेळेबद्दल धन्यवाद. नमस्कार.',
@@ -418,10 +458,12 @@ export class CommsService implements OnModuleInit {
 
     // Fire-and-forget knowledge graph build so per-turn handler has context.
     if (this.knowledgeGraph) {
-      this.knowledgeGraph
-        .buildStudentGraph(usn)
-        .then((kg) => this.conversation?.setKnowledgeGraph(callId, kg))
-        .catch((e) => console.error('[KnowledgeGraph] build error:', e));
+      keepAlive(
+        this.knowledgeGraph
+          .buildStudentGraph(usn)
+          .then((kg) => this.conversation?.setKnowledgeGraph(callId, kg))
+          .catch((e) => console.error('[KnowledgeGraph] build error:', e)),
+      );
     }
 
     const baseUrl = resolveTwilioWebhookBase();
@@ -437,7 +479,7 @@ export class CommsService implements OnModuleInit {
         ts: new Date().toISOString(), institutionId,
       });
       if (parentPhone) {
-        void this.dispatchTwilioCall(parentPhone, twimlUrl, statusUrl);
+        keepAlive(this.dispatchTwilioCall(parentPhone, twimlUrl, statusUrl));
       }
     } else {
       // Regional: pre-gen Sarvam audio for the greeting.
@@ -448,17 +490,19 @@ export class CommsService implements OnModuleInit {
         callId, turn: 0, role: 'AI', text: greeting, language,
         ts: new Date().toISOString(), institutionId,
       });
-      this.generateSarvamAudio(greeting, langCode)
-        .then(async (audio) => {
-          if (audio) {
-            this.setAudio(callId, audio);
-            this.logger.log(`[Trigger] audio stored key=${callId} bytes=${audio.length}`);
-          } else {
-            this.logger.warn(`[Trigger] Sarvam returned null — no audio stored for callId=${callId}`);
-          }
-          if (parentPhone) await this.dispatchTwilioCall(parentPhone, twimlUrl, statusUrl);
-        })
-        .catch((e) => console.error('[Sarvam→Twilio] Error:', e));
+      keepAlive(
+        this.generateSarvamAudio(greeting, langCode)
+          .then(async (audio) => {
+            if (audio) {
+              this.setAudio(callId, audio);
+              this.logger.log(`[Trigger] audio stored key=${callId} bytes=${audio.length}`);
+            } else {
+              this.logger.warn(`[Trigger] Sarvam returned null — no audio stored for callId=${callId}`);
+            }
+            if (parentPhone) await this.dispatchTwilioCall(parentPhone, twimlUrl, statusUrl);
+          })
+          .catch((e) => console.error('[Sarvam→Twilio] Error:', e)),
+      );
     }
 
     const callLog: AICallLog = {
@@ -545,6 +589,11 @@ export class CommsService implements OnModuleInit {
       return this.goodbyeTwiml(callId, language, goodbye, state.institutionId);
     }
 
+    // Human-agent request → live transfer (AI→human handoff)
+    if (parentText && HUMAN_INTENTS.test(parentText)) {
+      return this.dialAgentTwiml(callId, state, 'caller_requested_human');
+    }
+
     // Cap check (turns or duration)
     const turnCount = this.conversation?.count(callId) ?? 0;
     const elapsed = Date.now() - state.startedAt;
@@ -620,6 +669,94 @@ export class CommsService implements OnModuleInit {
 
   private hangupTwiml(message: string): string {
     return `<?xml version="1.0" encoding="UTF-8"?><Response><Say>${escapeXml(message)}</Say><Hangup/></Response>`;
+  }
+
+  /** Resolve the human-agent phone for handoff: per-institution override or global. */
+  private resolveAgentPhone(institutionId?: string): string | undefined {
+    const perInst = institutionId
+      ? process.env[`SUPPORT_AGENT_PHONE_${institutionId.toUpperCase()}`]
+      : undefined;
+    return (perInst || process.env['SUPPORT_AGENT_PHONE'] || '').trim() || undefined;
+  }
+
+  /**
+   * AI→human live transfer. Plays a brief "connecting you" line then <Dial>s the
+   * configured agent phone. If no agent number is configured, falls back to a
+   * polite goodbye. Records the transfer on the call log + transcript.
+   */
+  private dialAgentTwiml(callId: string, state: ConversationState, reason: string): string {
+    const language = state.language;
+    const langTag = BCP47[language] ?? 'en-IN';
+    const agentPhone = this.resolveAgentPhone(state.institutionId);
+    if (!agentPhone) {
+      this.logger.warn(`[Transfer] SUPPORT_AGENT_PHONE not set — goodbye fallback (call ${callId})`);
+      const goodbye = GOODBYE_BY_LANG[language] ?? GOODBYE_BY_LANG['en'];
+      return this.goodbyeTwiml(callId, language, goodbye, state.institutionId);
+    }
+
+    const log = this.callLogs.find((c) => c.id === callId);
+    if (log) {
+      log.transferStatus = 'PENDING';
+      log.transferReason = reason;
+      log.transferredAt = new Date().toISOString();
+      this.callLogRepo?.save({ ...log, calledAt: undefined } as unknown as AiCallLogEntity)
+        .catch((e) => console.error('DB persist error (dialAgent)', e));
+    }
+
+    const sysMsg = CONNECTING_BY_LANG[language] ?? CONNECTING_BY_LANG['en'];
+    const turnText = `[Transfer→human] ${sysMsg}`;
+    const sysTurn = this.conversation?.pushTurn(callId, 'AI', turnText, language);
+    if (sysTurn) {
+      this.events.emitAiCallTurn({
+        callId, turn: sysTurn.turn, role: 'AI', text: turnText, language,
+        ts: sysTurn.ts, institutionId: state.institutionId,
+      });
+    }
+    this.logger.log(`[Transfer] call ${callId} → agent ${agentPhone} (reason=${reason})`);
+
+    const baseUrl = resolveTwilioWebhookBase();
+    const callerId = (process.env['TWILIO_PHONE_NUMBER'] ?? process.env['TWILIO_FROM_NUMBER'] ?? '').trim();
+    const callerIdAttr = callerId ? ` callerId="${escapeXml(callerId)}"` : '';
+    const speakXml = language === 'en'
+      ? `<Say voice="${POLLY_VOICE_EN}" language="en-IN">${escapeXml(sysMsg)}</Say>`
+      : `<Say language="${langTag}">${escapeXml(sysMsg)}</Say>`;
+    return (
+      `<?xml version="1.0" encoding="UTF-8"?><Response>${speakXml}` +
+      `<Dial timeout="20"${callerIdAttr} action="${baseUrl}/api/comms/twiml/${callId}/transfer-result" method="POST">` +
+      `<Number>${escapeXml(agentPhone)}</Number></Dial></Response>`
+    );
+  }
+
+  /**
+   * Twilio <Dial> action callback. `completed` = agent answered & call ended →
+   * hang up. Otherwise the agent was unavailable → apologise and hang up
+   * (v1: no callback scheduler). Records the transfer outcome on the call log.
+   */
+  async finalizeTransfer(callId: string, dialStatus?: string, dialDuration?: number): Promise<string> {
+    const state = this.conversation?.get(callId);
+    const language = state?.language ?? 'en';
+    const langTag = BCP47[language] ?? 'en-IN';
+    const connected = dialStatus === 'completed';
+
+    const log = this.callLogs.find((c) => c.id === callId);
+    if (log) {
+      log.transferStatus = connected ? 'CONNECTED' : 'FAILED';
+      if (typeof dialDuration === 'number' && Number.isFinite(dialDuration)) {
+        log.transferDuration = dialDuration;
+      }
+      this.callLogRepo?.save({ ...log, calledAt: undefined } as unknown as AiCallLogEntity)
+        .catch((e) => console.error('DB persist error (finalizeTransfer)', e));
+    }
+    this.logger.log(`[Transfer] call ${callId} result=${dialStatus} connected=${connected}`);
+
+    if (connected) {
+      return `<?xml version="1.0" encoding="UTF-8"?><Response><Hangup/></Response>`;
+    }
+    const msg = TRANSFER_FALLBACK_BY_LANG[language] ?? TRANSFER_FALLBACK_BY_LANG['en'];
+    const speakXml = language === 'en'
+      ? `<Say voice="${POLLY_VOICE_EN}" language="en-IN">${escapeXml(msg)}</Say>`
+      : `<Say language="${langTag}">${escapeXml(msg)}</Say>`;
+    return `<?xml version="1.0" encoding="UTF-8"?><Response>${speakXml}<Hangup/></Response>`;
   }
 
   private buildSystemPrompt(recentTurns: Turn[], parentText: string, state: { usn: string; language: string; callType: string; knowledgeGraph?: unknown }): string {

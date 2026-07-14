@@ -113,6 +113,20 @@ class PublicCommsController {
     }
   }
 
+  /** Twilio <Dial> action callback for AI→human transfer. DialCallStatus is the
+   * outcome of the agent leg (completed/no-answer/busy/failed). */
+  @ Post('comms/twiml/:callId/transfer-result')
+  async serveTransferResult(
+    @Param('callId') callId: string,
+    @Body() body: { DialCallStatus?: string; DialCallDuration?: string },
+    @Res() res: Response,
+  ) {
+    const duration = body?.DialCallDuration ? Number(body.DialCallDuration) : undefined;
+    const xml = await this.svc.finalizeTransfer(callId, body?.DialCallStatus, duration);
+    res.type('text/xml');
+    res.send(xml);
+  }
+
 }
 
 export { PublicCommsController };
