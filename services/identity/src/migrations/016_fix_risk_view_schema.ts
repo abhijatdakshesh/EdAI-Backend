@@ -1,4 +1,5 @@
 import { MigrationInterface, QueryRunner } from 'typeorm';
+import { hasTables, skip } from './_guards';
 
 /**
  * Fix: `student_risk_scores` (migration 002) referenced column names that do
@@ -16,6 +17,11 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  */
 export class FixRiskViewSchema1700000000016 implements MigrationInterface {
   public async up(queryRunner: QueryRunner): Promise<void> {
+    const REQUIRES = ['attendance', 'internal_marks', 'fee_payments', 'students'];
+    if (!(await hasTables(queryRunner, REQUIRES))) {
+      skip('FixRiskViewSchema1700000000016', REQUIRES);
+      return;
+    }
     await queryRunner.query(`
       CREATE OR REPLACE VIEW student_risk_scores AS
       WITH

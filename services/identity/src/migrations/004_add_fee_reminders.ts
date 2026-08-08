@@ -1,7 +1,13 @@
 import { MigrationInterface, QueryRunner } from 'typeorm';
+import { hasTables, skip } from './_guards';
 
 export class AddFeeReminders1700000000004 implements MigrationInterface {
   public async up(queryRunner: QueryRunner): Promise<void> {
+    const REQUIRES = ['attendance', 'fee_payments', 'students'];
+    if (!(await hasTables(queryRunner, REQUIRES))) {
+      skip('AddFeeReminders1700000000004', REQUIRES);
+      return;
+    }
     // Tracks every reminder sent — prevents double-sending and gives NAAC audit trail
     await queryRunner.query(`
       CREATE TABLE IF NOT EXISTS fee_reminders (

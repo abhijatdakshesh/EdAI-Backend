@@ -1,9 +1,15 @@
 import { MigrationInterface, QueryRunner } from 'typeorm';
+import { hasTables, skip } from './_guards';
 
 export class PlacementIntelligence1700000000008 implements MigrationInterface {
   public readonly name = 'PlacementIntelligence1700000000008';
 
   public async up(queryRunner: QueryRunner): Promise<void> {
+    const REQUIRES = ['ia_marks', 'attendance', 'students', 'users'];
+    if (!(await hasTables(queryRunner, REQUIRES))) {
+      skip('PlacementIntelligence1700000000008', REQUIRES);
+      return;
+    }
     await queryRunner.query(`
       CREATE TABLE IF NOT EXISTS placement_companies (
         id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
