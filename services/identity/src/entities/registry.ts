@@ -44,7 +44,7 @@ import { PromotionBatchEntity, PromotionAuditEntity } from './promotion-batch.en
 import { VtuWindowEntity, VtuEligibilityEntity, VtuRegistrationEntity } from './vtu.entity';
 import { AiCallLogEntity, ConsentRecordEntity, AnnouncementEntity } from './comms.entity';
 import { StudentEntity, ParentStudentLinkEntity } from './student-orm.entity';
-import { PlacementDriveEntity, AlumniOutcomeEntity } from './placement.entity';
+import { AlumniOutcomeEntity } from './placement.entity';
 import { ModuleEntity, LessonEntity, LessonProgressEntity, TopicMasteryEntity } from './lms.entity';
 import {
   LmsAssignmentEntity,
@@ -97,7 +97,14 @@ export const ALL_ENTITIES: EntityClass[] = [
   AnnouncementEntity,
 
   // ── Placement ────────────────────────────────────────────────────────────
-  PlacementDriveEntity,
+  // NOTE: PlacementDriveEntity is deliberately NOT registered. It declares
+  // @Entity('placement_drives'), but migration 010 already created a table of
+  // that name for recruiter drive management with an entirely different shape
+  // (job_id, drive_tier, max_active_backlogs — not company/rounds/min_cgpa).
+  // Registering it would make DatabasePreflightService report a false green:
+  // the table exists, so the probe passes, while any real query would fail on
+  // missing columns. Nothing injects the entity today. It is dead code and
+  // should be deleted or renamed — not registered.
   AlumniOutcomeEntity,
 
   // ── LMS core ─────────────────────────────────────────────────────────────
