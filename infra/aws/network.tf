@@ -47,14 +47,18 @@ resource "aws_subnet" "private" {
   tags = { Name = "${local.name}-private-${local.azs[count.index]}" }
 }
 
+locals {
+  nat_count = var.enable_nat_gateway ? (var.single_nat_gateway ? 1 : var.az_count) : 0
+}
+
 resource "aws_eip" "nat" {
-  count  = var.single_nat_gateway ? 1 : var.az_count
+  count  = local.nat_count
   domain = "vpc"
   tags   = { Name = "${local.name}-nat-${count.index}" }
 }
 
 resource "aws_nat_gateway" "main" {
-  count = var.single_nat_gateway ? 1 : var.az_count
+  count = local.nat_count
 
   allocation_id = aws_eip.nat[count.index].id
   subnet_id     = aws_subnet.public[count.index].id
@@ -80,13 +84,20 @@ resource "aws_route_table_association" "public" {
   route_table_id = aws_route_table.public.id
 }
 
+# Without a NAT Gateway the private subnets have no default route at all. That
+# is deliberate: RDS and ElastiCache are the only things in them and neither
+# needs outbound internet. Tasks move to the public subnets instead.
 resource "aws_route_table" "private" {
   count  = var.az_count
   vpc_id = aws_vpc.main.id
 
-  route {
-    cidr_block     = "0.0.0.0/0"
-    nat_gateway_id = var.single_nat_gateway ? aws_nat_gateway.main[0].id : aws_nat_gateway.main[count.index].id
+  dynamic "route" {
+    for_each = var.enable_nat_gateway ? [1] : []
+
+    content {
+      cidr_block     = "0.0.0.0/0"
+      nat_gateway_id = var.single_nat_gateway ? aws_nat_gateway.main[0].id : aws_nat_gateway.main[count.index].id
+    }
   }
 
   tags = { Name = "${local.name}-private-${count.index}" }
@@ -188,4 +199,10 @@ resource "aws_security_group" "data" {
   }
 
   tags = { Name = "${local.name}-data" }
+}
+
+locals {
+  # Tasks live in private subnets when a NAT Gateway provides their egress, and
+  # in public subnets (with a public IP) when it does not.
+  task_subnet_ids = var.enable_nat_gateway ? aws_subnet.private[*].id : aws_subnet.public[*].id
 }

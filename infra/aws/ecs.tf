@@ -276,9 +276,12 @@ resource "aws_ecs_service" "identity" {
   enable_execute_command = true
 
   network_configuration {
-    subnets          = aws_subnet.private[*].id
+    # With no NAT Gateway, tasks must sit in the public subnets and carry a
+    # public IP to reach ECR, Twilio, Gemini and Sarvam. Ingress is still
+    # restricted to the ALB security group.
+    subnets          = local.task_subnet_ids
     security_groups  = [aws_security_group.tasks.id]
-    assign_public_ip = false
+    assign_public_ip = !var.enable_nat_gateway
   }
 
   load_balancer {
@@ -318,9 +321,12 @@ resource "aws_ecs_service" "web" {
   enable_execute_command = true
 
   network_configuration {
-    subnets          = aws_subnet.private[*].id
+    # With no NAT Gateway, tasks must sit in the public subnets and carry a
+    # public IP to reach ECR, Twilio, Gemini and Sarvam. Ingress is still
+    # restricted to the ALB security group.
+    subnets          = local.task_subnet_ids
     security_groups  = [aws_security_group.tasks.id]
-    assign_public_ip = false
+    assign_public_ip = !var.enable_nat_gateway
   }
 
   load_balancer {

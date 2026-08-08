@@ -50,6 +50,53 @@ variable "single_nat_gateway" {
   default     = true
 }
 
+variable "enable_nat_gateway" {
+  type        = bool
+  description = <<-EOT
+    When false, no NAT Gateway is created and ECS tasks run in the PUBLIC
+    subnets with a public IP, which they need in order to pull images from ECR
+    and reach Twilio, Gemini and Sarvam.
+
+    This saves ~$35/month, and it is a real security trade: the tasks get a
+    routable address. Their security group still accepts ingress only from the
+    ALB, so nothing is reachable from the internet, but there is no longer a
+    routing-level guarantee behind that.
+
+    RDS and ElastiCache stay in the private subnets either way — the data layer
+    is never publicly addressable regardless of this setting.
+  EOT
+  default     = true
+}
+
+variable "enable_cloudfront" {
+  type        = bool
+  description = <<-EOT
+    CDN in front of the web tier. Off for the pilot: the ALB serves Next.js
+    directly, which is correct but without edge caching of /_next/static.
+    Turning it on later is additive and changes only the app hostname's DNS
+    target.
+  EOT
+  default     = true
+}
+
+variable "manage_dns" {
+  type        = bool
+  description = <<-EOT
+    Whether Terraform manages Route 53 records.
+
+    FALSE for raycraft.in: the zone is hosted at GoDaddy (ns37/ns38.
+    domaincontrol.com), and this AWS account cannot use Route 53 at all —
+    ListHostedZones returns OptInRequired on the Free Plan. ACM validation
+    records and the final cutover record are emitted as outputs for manual
+    entry instead.
+
+    The cost of this is weighted cutover: GoDaddy cannot split traffic, so the
+    Vercel → AWS switch is all-or-nothing per hostname. Rollback is editing the
+    record back, bounded by TTL rather than by a Route 53 weight change.
+  EOT
+  default     = false
+}
+
 # ── Compute sizing ──────────────────────────────────────────────────────────
 
 variable "web_cpu" {
@@ -146,4 +193,14 @@ variable "strict_db" {
     usually beats a container that will not start.
   EOT
   default     = "0"
+}
+
+variable "db_deletion_protection" {
+  type        = bool
+  description = <<-EOT
+    Blocks `terraform destroy` from removing the database, and takes a final
+    snapshot. True for production. False for a credit-limited pilot that has to
+    be tearable-down, which also means an accidental destroy loses the data.
+  EOT
+  default     = true
 }

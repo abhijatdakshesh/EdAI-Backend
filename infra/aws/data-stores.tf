@@ -52,11 +52,12 @@ resource "aws_db_instance" "main" {
   backup_window           = "18:00-19:00" # ~23:30 IST, off-peak for a college
   maintenance_window      = "sun:19:30-sun:20:30"
 
-  deletion_protection       = true
-  skip_final_snapshot       = false
-  final_snapshot_identifier = "${local.name}-postgres-final"
+  # A pilot on finite credits has to be destroyable. Flip both for production.
+  deletion_protection       = var.db_deletion_protection
+  skip_final_snapshot       = !var.db_deletion_protection
+  final_snapshot_identifier = var.db_deletion_protection ? "${local.name}-postgres-final" : null
 
-  performance_insights_enabled    = true
+  performance_insights_enabled    = var.db_instance_class != "db.t4g.micro"
   enabled_cloudwatch_logs_exports = ["postgresql"]
 
   # DPDP Act 2023: student PII must not leave ap-south-1. Do not add a

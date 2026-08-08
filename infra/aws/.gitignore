@@ -9,6 +9,7 @@ tf.plan
 # put in a .tfvars ends up in state in plaintext.
 *.tfvars
 !*.tfvars.example
+!pilot.tfvars   # sizing knobs only, no secrets
 
 # .terraform.lock.hcl IS committed on purpose — it pins provider versions so a
 # later apply cannot silently pick up a different AWS provider.
