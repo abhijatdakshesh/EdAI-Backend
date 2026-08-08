@@ -1,0 +1,117 @@
+name: Deploy — Identity to ECS (AWS)
+
+# Replaces deploy-prod.yml, which targets Azure Container Apps
+# (edaiacrprod / aca-identity / rg-edai-prod-cin). Nothing has deployed to Azure
+# in a long time — production ran on Vercel — so that workflow is stale and
+# misleading. It is left in place until this one has deployed successfully at
+# least once, then it should be deleted.
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: "Type DEPLOY to confirm production release"
+        required: true
+
+concurrency:
+  group: deploy-identity-aws
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: ap-south-1
+  ECR_REPOSITORY: edai/identity
+  ECS_CLUSTER: edai-prod
+  ECS_SERVICE: identity
+
+permissions:
+  id-token: write # OIDC — no long-lived AWS keys in GitHub secrets
+  contents: read
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate confirmation
+        if: ${{ github.event.inputs.confirm != 'DEPLOY' }}
+        run: |
+          echo "Confirmation not provided. Aborting."
+          exit 1
+
+  test:
+    needs: [gate]
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: services/identity
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: services/identity/package-lock.json
+
+      - run: npm ci --legacy-peer-deps
+      - run: npx tsc -p tsconfig.json --noEmit
+      - run: npm test
+
+  deploy:
+    needs: [test]
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push
+        env:
+          REGISTRY: ${{ steps.ecr.outputs.registry }}
+        run: |
+          docker buildx build --platform linux/amd64 --push \
+            -t "$REGISTRY/$ECR_REPOSITORY:${{ github.sha }}" \
+            -t "$REGISTRY/$ECR_REPOSITORY:latest" \
+            -f services/identity/Dockerfile \
+            services/identity
+
+      - name: Render task definition with the new image
+        id: taskdef
+        env:
+          REGISTRY: ${{ steps.ecr.outputs.registry }}
+        run: |
+          aws ecs describe-task-definition \
+            --task-definition "$ECS_CLUSTER-identity" \
+            --query taskDefinition > taskdef.json
+          # Strip the read-only fields the register call rejects.
+          jq 'del(.taskDefinitionArn, .revision, .status, .requiresAttributes,
+                  .compatibilities, .registeredAt, .registeredBy)
+              | .containerDefinitions[0].image = $img' \
+             --arg img "$REGISTRY/$ECR_REPOSITORY:${{ github.sha }}" \
+             taskdef.json > new-taskdef.json
+          ARN=$(aws ecs register-task-definition \
+                  --cli-input-json file://new-taskdef.json \
+                  --query 'taskDefinition.taskDefinitionArn' --output text)
+          echo "arn=$ARN" >> "$GITHUB_OUTPUT"
+
+      - name: Deploy and wait for the service to stabilise
+        run: |
+          aws ecs update-service \
+            --cluster "$ECS_CLUSTER" --service "$ECS_SERVICE" \
+            --task-definition "${{ steps.taskdef.outputs.arn }}"
+          # The service's deployment circuit breaker rolls back on failure;
+          # this makes the workflow fail with it rather than reporting success.
+          aws ecs wait services-stable --cluster "$ECS_CLUSTER" --services "$ECS_SERVICE"
+
+      - name: Health check
+        run: |
+          curl --fail --retry 6 --retry-delay 10 --retry-connrefused \
+            "https://api.raycraft.in/api/health"
