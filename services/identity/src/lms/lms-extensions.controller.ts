@@ -96,20 +96,20 @@ export class LmsExtensionsController {
   }
 
   @Post('heartbeat')
-  heartbeat(
+  async heartbeat(
     @Body() body: { courseId: string; lessonId: string },
     @Request() req: any,
   ) {
     const collegeId = resolveCollegeId(req);
     const usn = this.usn(req);
-    this.ext.recordLearningMinute(collegeId, usn, body.courseId, body.lessonId);
-    const streak = this.ext.touchStreak(collegeId, usn);
-    return { ok: true, ...streak, hours: this.ext.getLearningHours(usn, body.courseId) };
+    await this.ext.recordLearningMinute(collegeId, usn, body.courseId, body.lessonId);
+    const streak = await this.ext.touchStreak(collegeId, usn);
+    return { ok: true, ...streak, hours: await this.ext.getLearningHours(usn, body.courseId) };
   }
 
   @Get('learning-hours')
-  learningHours(@Query('courseId') courseId: string, @Request() req: any) {
-    return { hours: this.ext.getLearningHours(this.usn(req), courseId) };
+  async learningHours(@Query('courseId') courseId: string, @Request() req: any) {
+    return { hours: await this.ext.getLearningHours(this.usn(req), courseId) };
   }
 
   // ── Faculty / admin analytics ────────────────────────────────────────────

@@ -1,11 +1,29 @@
-import { ForbiddenException, Injectable, Logger, NotFoundException, Optional } from '@nestjs/common';
+import {
+  ForbiddenException,
+  Injectable,
+  Logger,
+  NotFoundException,
+  OnModuleInit,
+  Optional,
+} from '@nestjs/common';
+import { InjectRepository } from '@nestjs/typeorm';
+import { Repository } from 'typeorm';
 import { randomUUID } from 'node:crypto';
 import { LmsService } from './lms.service';
 import { AbcCreditsService } from '../abc-credits/abc-credits.service';
 import { geminiGenerate, GEMINI_FAST } from '../shared/gemini-ai';
 import { LMS_DEMO_COURSE_ID } from './lms-demo-seed';
+import {
+  LmsAssignmentEntity,
+  LmsSubmissionEntity,
+  LmsQuizQuestionEntity,
+  LmsDiscussionPostEntity,
+  LmsLessonPrerequisiteEntity,
+  LmsLearningSessionEntity,
+  LmsStreakEntity,
+} from '../entities/lms-extensions.entity';
 
-// ── In-memory shapes (persist via migration 013 when DB wired) ───────────────
+// ── Wire shapes (unchanged — these are what controllers return) ─────────────
 
 export interface LmsAssignment {
   id: string;
@@ -49,32 +67,154 @@ export interface DiscussionPost {
   createdAt: string;
 }
 
+/**
+ * LMS Phases 2–6: assignments, adaptive quizzes, discussions, prerequisites,
+ * learning hours and streaks.
+ *
+ * PERSISTENCE
+ * -----------
+ * Migration 013 has always created the seven backing tables, but this service
+ * never injected a repository — every write went to a process-local array and
+ * was lost on cold start, while the tables stayed permanently empty. Student
+ * submissions, discussion posts and streaks were the visible casualties.
+ *
+ * It now follows the same dual-mode contract as LmsService: use the repository
+ * when one is available and its table is reachable, otherwise fall back to the
+ * in-memory store so tests and no-DATABASE_URL environments keep working.
+ *
+ * Methods that touch persisted state are async. That is a deliberate API
+ * change — the previous synchronous signatures could not have been backed by a
+ * database, and every caller has been updated.
+ */
 @Injectable()
-export class LmsExtensionsService {
+export class LmsExtensionsService implements OnModuleInit {
   private readonly logger = new Logger(LmsExtensionsService.name);
+
+  // In-memory fallbacks (used when repos are absent or their table is missing)
   private readonly assignments: LmsAssignment[] = [];
   private readonly submissions: LmsSubmission[] = [];
   private readonly quizBank: QuizQuestion[] = [];
   private readonly discussions: DiscussionPost[] = [];
   private readonly prerequisites = new Map<string, string>(); // lessonId -> requiresLessonId
-  private readonly learningMinutes = new Map<string, number>(); // `${usn}:${courseId}` -> minutes
+  private readonly learningMinutes = new Map<string, number>(); // `${usn}:${courseId}:${date}` -> minutes
   private readonly streaks = new Map<string, { current: number; longest: number; lastDate: string }>();
+
+  /** Mutable so verifyTables() can disable a repo whose table is missing. */
+  private asgnRepo?: Repository<LmsAssignmentEntity>;
+  private subRepo?: Repository<LmsSubmissionEntity>;
+  private quizRepo?: Repository<LmsQuizQuestionEntity>;
+  private discRepo?: Repository<LmsDiscussionPostEntity>;
+  private prereqRepo?: Repository<LmsLessonPrerequisiteEntity>;
+  private sessionRepo?: Repository<LmsLearningSessionEntity>;
+  private streakRepo?: Repository<LmsStreakEntity>;
 
   constructor(
     private readonly lms: LmsService,
     @Optional() private readonly abc?: AbcCreditsService,
+    @Optional() @InjectRepository(LmsAssignmentEntity) asgn?: Repository<LmsAssignmentEntity>,
+    @Optional() @InjectRepository(LmsSubmissionEntity) sub?: Repository<LmsSubmissionEntity>,
+    @Optional() @InjectRepository(LmsQuizQuestionEntity) quiz?: Repository<LmsQuizQuestionEntity>,
+    @Optional() @InjectRepository(LmsDiscussionPostEntity) disc?: Repository<LmsDiscussionPostEntity>,
+    @Optional() @InjectRepository(LmsLessonPrerequisiteEntity) prereq?: Repository<LmsLessonPrerequisiteEntity>,
+    @Optional() @InjectRepository(LmsLearningSessionEntity) session?: Repository<LmsLearningSessionEntity>,
+    @Optional() @InjectRepository(LmsStreakEntity) streak?: Repository<LmsStreakEntity>,
   ) {
-    this.seedExtensions();
+    this.asgnRepo = asgn;
+    this.subRepo = sub;
+    this.quizRepo = quiz;
+    this.discRepo = disc;
+    this.prereqRepo = prereq;
+    this.sessionRepo = session;
+    this.streakRepo = streak;
+    this.seedInMemory();
   }
 
-  private seedExtensions(): void {
-    const collegeId = process.env['DEFAULT_COLLEGE_ID'] ?? 'rvce';
+  async onModuleInit(): Promise<void> {
+    await this.verifyTables();
+    await this.seedDbIfEmpty();
+  }
+
+  private get collegeDefault(): string {
+    return process.env['DEFAULT_COLLEGE_ID'] ?? 'rvce';
+  }
+
+  /**
+   * Disable any repo whose table is unreachable so the service degrades to
+   * in-memory instead of 500-ing every request.
+   *
+   * `tableName` is read BEFORE the probe: for an entity missing from the
+   * registry, `repo.metadata` itself throws, and reading it inside the catch
+   * would throw again and take the bootstrap down.
+   */
+  private async verifyTables(): Promise<void> {
+    type RepoField =
+      | 'asgnRepo' | 'subRepo' | 'quizRepo' | 'discRepo'
+      | 'prereqRepo' | 'sessionRepo' | 'streakRepo';
+    const checks: Array<[RepoField, Repository<never> | undefined]> = [
+      ['asgnRepo', this.asgnRepo as never],
+      ['subRepo', this.subRepo as never],
+      ['quizRepo', this.quizRepo as never],
+      ['discRepo', this.discRepo as never],
+      ['prereqRepo', this.prereqRepo as never],
+      ['sessionRepo', this.sessionRepo as never],
+      ['streakRepo', this.streakRepo as never],
+    ];
+    for (const [field, repo] of checks) {
+      if (!repo) continue;
+      let tableName = '(unknown)';
+      try {
+        tableName = repo.metadata.tableName;
+        await repo.query(`SELECT 1 FROM "${tableName}" LIMIT 1`);
+      } catch (e) {
+        this.logger.warn(
+          `[LMS-EXT] table '${tableName}' unreachable (${(e as Error).message}); ` +
+            `falling back to in-memory store — data will not survive a restart`,
+        );
+        (this as unknown as Record<RepoField, unknown>)[field] = undefined;
+      }
+    }
+  }
+
+  /** Demo content for environments with no database. */
+  private seedInMemory(): void {
+    const collegeId = this.collegeDefault;
     if (this.quizBank.length > 0) return;
 
-    const topics = ['fcfs', 'sjf', 'round-robin', 'scheduling'];
-    for (const topic of topics) {
+    for (const q of this.demoQuizQuestions(collegeId)) this.quizBank.push(q);
+
+    this.prerequisites.set('les-sjf', 'les-fcfs');
+    this.prerequisites.set('les-rr', 'les-sjf');
+
+    this.assignments.push(this.demoAssignment(collegeId));
+  }
+
+  /** Same demo content, but only when the tables are genuinely empty. */
+  private async seedDbIfEmpty(): Promise<void> {
+    const collegeId = this.collegeDefault;
+    try {
+      if (this.quizRepo && (await this.quizRepo.count()) === 0) {
+        await this.quizRepo.save(this.demoQuizQuestions(collegeId));
+      }
+      if (this.asgnRepo && (await this.asgnRepo.count()) === 0) {
+        await this.asgnRepo.save(this.asgnRepo.create(this.demoAssignment(collegeId)));
+      }
+      // Prerequisites are already seeded by migration 013; only backfill if absent.
+      if (this.prereqRepo && (await this.prereqRepo.count()) === 0) {
+        await this.prereqRepo.save([
+          { lessonId: 'les-sjf', collegeId, requiresLessonId: 'les-fcfs' },
+          { lessonId: 'les-rr', collegeId, requiresLessonId: 'les-sjf' },
+        ]);
+      }
+    } catch (e) {
+      this.logger.warn(`[LMS-EXT] demo seed skipped: ${(e as Error).message}`);
+    }
+  }
+
+  private demoQuizQuestions(collegeId: string): QuizQuestion[] {
+    const out: QuizQuestion[] = [];
+    for (const topic of ['fcfs', 'sjf', 'round-robin', 'scheduling']) {
       for (let i = 0; i < 3; i++) {
-        this.quizBank.push({
+        out.push({
           id: `qq-${topic}-${i}`,
           collegeId,
           courseId: LMS_DEMO_COURSE_ID,
@@ -85,11 +225,11 @@ export class LmsExtensionsService {
         });
       }
     }
+    return out;
+  }
 
-    this.prerequisites.set('les-sjf', 'les-fcfs');
-    this.prerequisites.set('les-rr', 'les-sjf');
-
-    this.assignments.push({
+  private demoAssignment(collegeId: string): LmsAssignment {
+    return {
       id: 'asgn-fcfs-lab',
       collegeId,
       lessonId: 'les-fcfs',
@@ -97,13 +237,15 @@ export class LmsExtensionsService {
       description: 'Submit your Python FCFS simulation output.',
       submissionType: 'CODE',
       published: true,
-    });
+    };
   }
 
   // ── Phase 2: Prerequisites ───────────────────────────────────────────────
 
   async assertLessonUnlocked(collegeId: string, usn: string, lessonId: string): Promise<void> {
-    const req = this.prerequisites.get(lessonId);
+    const req = this.prereqRepo
+      ? (await this.prereqRepo.findOne({ where: { collegeId, lessonId } }))?.requiresLessonId
+      : this.prerequisites.get(lessonId);
     if (!req) return;
     const prog = await this.lms.getProgress(collegeId, usn, req);
     if (prog?.state !== 'MASTERED') {
@@ -113,25 +255,69 @@ export class LmsExtensionsService {
 
   // ── Phase 2: Assignments ─────────────────────────────────────────────────
 
-  listAssignments(collegeId: string, lessonId: string, publishedOnly = false): LmsAssignment[] {
-    return this.assignments.filter(
-      (a) => a.collegeId === collegeId && a.lessonId === lessonId && (!publishedOnly || a.published),
-    );
+  async listAssignments(
+    collegeId: string,
+    lessonId: string,
+    publishedOnly = false,
+  ): Promise<LmsAssignment[]> {
+    const rows = this.asgnRepo
+      ? await this.asgnRepo.find({ where: { collegeId, lessonId } })
+      : this.assignments.filter((a) => a.collegeId === collegeId && a.lessonId === lessonId);
+    const visible = publishedOnly ? rows.filter((a) => a.published) : rows;
+    return visible.map((a) => ({
+      id: a.id,
+      collegeId: a.collegeId,
+      lessonId: a.lessonId,
+      title: a.title,
+      description: a.description,
+      submissionType: a.submissionType,
+      published: a.published,
+    }));
   }
 
-  submitAssignment(
+  async submitAssignment(
     collegeId: string,
     assignmentId: string,
     studentUsn: string,
     body: string,
-  ): LmsSubmission {
-    const asgn = this.assignments.find((a) => a.id === assignmentId && a.collegeId === collegeId);
+  ): Promise<LmsSubmission> {
+    const asgn = this.asgnRepo
+      ? await this.asgnRepo.findOne({ where: { id: assignmentId, collegeId } })
+      : this.assignments.find((a) => a.id === assignmentId && a.collegeId === collegeId);
     if (!asgn) throw new NotFoundException('Assignment not found');
+
+    const score = body.trim().length > 20 ? 0.85 : 0.5;
+    const feedback = score >= 0.8 ? 'Meets rubric — good work.' : 'Add more detail or test cases.';
+
+    if (this.subRepo) {
+      const existing = await this.subRepo.findOne({ where: { assignmentId, studentUsn } });
+      const saved = await this.subRepo.save({
+        id: existing?.id ?? `sub-${randomUUID().slice(0, 8)}`,
+        collegeId,
+        assignmentId,
+        studentUsn,
+        body,
+        score,
+        feedback,
+        // Preserve the original timestamp on resubmission, matching the
+        // in-memory branch's Object.assign semantics for a stable id.
+        submittedAt: existing?.submittedAt ?? new Date(),
+      });
+      return {
+        id: saved.id,
+        collegeId: saved.collegeId,
+        assignmentId: saved.assignmentId,
+        studentUsn: saved.studentUsn,
+        body: saved.body,
+        score: saved.score,
+        feedback: saved.feedback,
+        submittedAt: new Date(saved.submittedAt).toISOString(),
+      };
+    }
+
     const existing = this.submissions.find(
       (s) => s.assignmentId === assignmentId && s.studentUsn === studentUsn,
     );
-    const score = body.trim().length > 20 ? 0.85 : 0.5;
-    const feedback = score >= 0.8 ? 'Meets rubric — good work.' : 'Add more detail or test cases.';
     const row: LmsSubmission = {
       id: existing?.id ?? `sub-${randomUUID().slice(0, 8)}`,
       collegeId,
@@ -144,7 +330,10 @@ export class LmsExtensionsService {
     };
     if (existing) Object.assign(existing, row);
     else this.submissions.push(row);
-    return row;
+    // Return a copy, not the stored object: the repository branch hands back a
+    // detached row, and callers holding an earlier return value must not see it
+    // mutate under them on resubmission.
+    return { ...row };
   }
 
   // ── Phase 2: Adaptive quizzes ────────────────────────────────────────────
@@ -156,25 +345,31 @@ export class LmsExtensionsService {
     limit = 5,
   ): Promise<QuizQuestion[]> {
     const mastery = await this.lms.getMastery(collegeId, usn, courseId);
-    const weakTopics = mastery
-      .filter((m) => m.masteryScore < 0.66)
-      .map((m) => m.topic);
+    const weakTopics = mastery.filter((m) => m.masteryScore < 0.66).map((m) => m.topic);
     const topics = weakTopics.length > 0 ? weakTopics : ['scheduling', 'fcfs'];
-    const pool = this.quizBank.filter(
-      (q) => q.collegeId === collegeId && q.courseId === courseId && topics.includes(q.topic),
-    );
-    return pool.slice(0, limit);
+
+    if (this.quizRepo) {
+      return this.quizRepo.find({
+        where: topics.map((topic) => ({ collegeId, courseId, topic })),
+        take: limit,
+      });
+    }
+    return this.quizBank
+      .filter((q) => q.collegeId === collegeId && q.courseId === courseId && topics.includes(q.topic))
+      .slice(0, limit);
   }
 
-  gradeQuiz(
+  async gradeQuiz(
     collegeId: string,
     usn: string,
     courseId: string,
     answers: Array<{ questionId: string; selectedIndex: number }>,
-  ): { score: number; total: number; pct: number } {
+  ): Promise<{ score: number; total: number; pct: number }> {
     let score = 0;
     for (const a of answers) {
-      const q = this.quizBank.find((x) => x.id === a.questionId && x.collegeId === collegeId);
+      const q = this.quizRepo
+        ? await this.quizRepo.findOne({ where: { id: a.questionId, collegeId } })
+        : this.quizBank.find((x) => x.id === a.questionId && x.collegeId === collegeId);
       if (q && a.selectedIndex === q.correctIndex) score += 1;
     }
     const total = answers.length;
@@ -187,19 +382,37 @@ export class LmsExtensionsService {
 
   // ── Phase 2: Discussions ─────────────────────────────────────────────────
 
-  listDiscussions(collegeId: string, lessonId: string): DiscussionPost[] {
-    return this.discussions
-      .filter((d) => d.collegeId === collegeId && d.lessonId === lessonId)
-      .sort((a, b) => (b.pinned ? 1 : 0) - (a.pinned ? 1 : 0) || b.createdAt.localeCompare(a.createdAt));
+  async listDiscussions(collegeId: string, lessonId: string): Promise<DiscussionPost[]> {
+    const rows = this.discRepo
+      ? await this.discRepo.find({
+          where: { collegeId, lessonId },
+          order: { pinned: 'DESC', createdAt: 'DESC' },
+        })
+      : this.discussions
+          .filter((d) => d.collegeId === collegeId && d.lessonId === lessonId)
+          .sort(
+            (a, b) =>
+              (b.pinned ? 1 : 0) - (a.pinned ? 1 : 0) || b.createdAt.localeCompare(a.createdAt),
+          );
+    return rows.map((d) => ({
+      id: d.id,
+      collegeId: d.collegeId,
+      lessonId: d.lessonId,
+      authorUsn: d.authorUsn,
+      authorRole: d.authorRole,
+      body: d.body,
+      pinned: d.pinned,
+      createdAt: new Date(d.createdAt).toISOString(),
+    }));
   }
 
-  postDiscussion(
+  async postDiscussion(
     collegeId: string,
     lessonId: string,
     authorUsn: string,
     authorRole: string,
     body: string,
-  ): DiscussionPost {
+  ): Promise<DiscussionPost> {
     const post: DiscussionPost = {
       id: `disc-${randomUUID().slice(0, 8)}`,
       collegeId,
@@ -210,29 +423,61 @@ export class LmsExtensionsService {
       pinned: authorRole !== 'STUDENT',
       createdAt: new Date().toISOString(),
     };
+    if (this.discRepo) {
+      const saved = await this.discRepo.save({ ...post, createdAt: new Date(post.createdAt) });
+      return { ...post, id: saved.id, createdAt: new Date(saved.createdAt).toISOString() };
+    }
     this.discussions.push(post);
     return post;
   }
 
   // ── Phase 2: Streaks ─────────────────────────────────────────────────────
 
-  touchStreak(collegeId: string, studentUsn: string): { currentStreak: number; longestStreak: number } {
+  async touchStreak(
+    collegeId: string,
+    studentUsn: string,
+  ): Promise<{ currentStreak: number; longestStreak: number }> {
     const today = new Date().toISOString().slice(0, 10);
+    const yesterday = new Date(Date.now() - 86_400_000).toISOString().slice(0, 10);
+
+    if (this.streakRepo) {
+      const row = await this.streakRepo.findOne({ where: { collegeId, studentUsn } });
+      if (row?.lastActiveDate === today) {
+        return { currentStreak: row.currentStreak, longestStreak: row.longestStreak };
+      }
+      const current = row?.lastActiveDate === yesterday ? row.currentStreak + 1 : 1;
+      const longest = Math.max(row?.longestStreak ?? 0, current);
+      await this.streakRepo.save({
+        id: row?.id ?? `streak-${collegeId}-${studentUsn}`,
+        collegeId,
+        studentUsn,
+        currentStreak: current,
+        longestStreak: longest,
+        lastActiveDate: today,
+      });
+      return { currentStreak: current, longestStreak: longest };
+    }
+
     const key = `${collegeId}:${studentUsn}`;
     const prev = this.streaks.get(key) ?? { current: 0, longest: 0, lastDate: '' };
     if (prev.lastDate === today) {
       return { currentStreak: prev.current, longestStreak: prev.longest };
     }
-    const yesterday = new Date(Date.now() - 86_400_000).toISOString().slice(0, 10);
     const current = prev.lastDate === yesterday ? prev.current + 1 : 1;
     const longest = Math.max(prev.longest, current);
     this.streaks.set(key, { current, longest, lastDate: today });
     return { currentStreak: current, longestStreak: longest };
   }
 
-  getStreak(collegeId: string, studentUsn: string) {
-    const key = `${collegeId}:${studentUsn}`;
-    const s = this.streaks.get(key);
+  async getStreak(
+    collegeId: string,
+    studentUsn: string,
+  ): Promise<{ currentStreak: number; longestStreak: number }> {
+    if (this.streakRepo) {
+      const row = await this.streakRepo.findOne({ where: { collegeId, studentUsn } });
+      return { currentStreak: row?.currentStreak ?? 0, longestStreak: row?.longestStreak ?? 0 };
+    }
+    const s = this.streaks.get(`${collegeId}:${studentUsn}`);
     return { currentStreak: s?.current ?? 0, longestStreak: s?.longest ?? 0 };
   }
 
@@ -261,18 +506,45 @@ export class LmsExtensionsService {
 
   // ── Phase 4: Learning hours ──────────────────────────────────────────────
 
-  recordLearningMinute(collegeId: string, usn: string, courseId: string, lessonId: string): void {
-    const dayKey = `${usn}:${courseId}:${new Date().toISOString().slice(0, 10)}`;
+  async recordLearningMinute(
+    collegeId: string,
+    usn: string,
+    courseId: string,
+    lessonId: string,
+  ): Promise<void> {
+    const day = new Date().toISOString().slice(0, 10);
+
+    if (this.sessionRepo) {
+      // One row per (student, course, day) — matches the in-memory day-level
+      // aggregation. lessonId records the most recent lesson touched.
+      const id = `ls-${collegeId}-${usn}-${courseId}-${day}`;
+      const existing = await this.sessionRepo.findOne({ where: { id } });
+      await this.sessionRepo.save({
+        id,
+        collegeId,
+        studentUsn: usn,
+        courseId,
+        lessonId,
+        minutes: (existing?.minutes ?? 0) + 1,
+        sessionDate: day,
+      });
+      return;
+    }
+
+    const dayKey = `${usn}:${courseId}:${day}`;
     this.learningMinutes.set(dayKey, (this.learningMinutes.get(dayKey) ?? 0) + 1);
-    void lessonId;
-    void collegeId;
   }
 
-  getLearningHours(usn: string, courseId: string): number {
+  async getLearningHours(usn: string, courseId: string): Promise<number> {
     let mins = 0;
-    const prefix = `${usn}:${courseId}:`;
-    for (const [k, v] of this.learningMinutes) {
-      if (k.startsWith(prefix)) mins += v;
+    if (this.sessionRepo) {
+      const rows = await this.sessionRepo.find({ where: { studentUsn: usn, courseId } });
+      for (const r of rows) mins += r.minutes;
+    } else {
+      const prefix = `${usn}:${courseId}:`;
+      for (const [k, v] of this.learningMinutes) {
+        if (k.startsWith(prefix)) mins += v;
+      }
     }
     return Math.round((mins / 60) * 10) / 10;
   }
@@ -312,7 +584,6 @@ export class LmsExtensionsService {
   async facultyHeatmap(collegeId: string, courseId: string) {
     const mods = await this.lms.listModules(collegeId, courseId, { publishedOnly: true });
     const topics: Record<string, { topic: string; avgMastery: number; studentCount: number }> = {};
-    const usns = new Set<string>();
     for (const mod of mods) {
       const lessons = await this.lms.listLessons(collegeId, mod.id, { publishedOnly: true });
       for (const les of lessons) {

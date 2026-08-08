@@ -9,16 +9,17 @@ import {
   ObeProgramEntity, ObeOutcomeEntity, CourseOutcomeEntity, CoPoMapEntity,
   AssessmentCoMapEntity, QuestionMarkEntity, ExitSurveyEntity, AttainmentConfigEntity,
 } from '../entities/obe.entity';
+import { assertRegistered } from '../entities/registry';
 
 @Module({
   imports: [
     IaModule,
     CoursesModule,
     ...(process.env['DATABASE_URL']
-      ? [TypeOrmModule.forFeature([
+      ? [TypeOrmModule.forFeature(assertRegistered([
           ObeProgramEntity, ObeOutcomeEntity, CourseOutcomeEntity, CoPoMapEntity,
           AssessmentCoMapEntity, QuestionMarkEntity, ExitSurveyEntity, AttainmentConfigEntity,
-        ])]
+        ]))]
       : []),
   ],
   controllers: [ObeController],
