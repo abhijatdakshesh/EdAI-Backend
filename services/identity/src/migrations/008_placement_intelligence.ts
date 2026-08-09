@@ -5,11 +5,11 @@ export class PlacementIntelligence1700000000008 implements MigrationInterface {
   public readonly name = 'PlacementIntelligence1700000000008';
 
   public async up(queryRunner: QueryRunner): Promise<void> {
-    const REQUIRES = ['ia_marks', 'attendance', 'students', 'users'];
-    if (!(await hasTables(queryRunner, REQUIRES))) {
-      skip('PlacementIntelligence1700000000008', REQUIRES);
-      return;
-    }
+    // Guard moved off the top of this method: it covers ONLY the
+    // placement_readiness_scores view, which reads ia_marks and attendance.
+    // placement_companies / _matches / _resumes / _offers are owned by this
+    // service, and a blanket guard here meant none of them were ever created on
+    // a database without the academics read-model.
     await queryRunner.query(`
       CREATE TABLE IF NOT EXISTS placement_companies (
         id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -31,7 +31,15 @@ export class PlacementIntelligence1700000000008 implements MigrationInterface {
 
     // Uses actual DB schema: ia_marks (not internal_marks), students.id (UUID PK),
     // students.student_id (USN), attendance.status lowercase, semester is VARCHAR
-    await queryRunner.query(`
+    // Reads ia_marks + attendance (academics/attendance services). Where those
+    // are absent the four tables above still exist; only this view is skipped.
+    const VIEW_REQUIRES = ['ia_marks', 'attendance', 'students', 'users'];
+    const canBuildView = await hasTables(queryRunner, VIEW_REQUIRES);
+    if (!canBuildView) {
+      skip('PlacementIntelligence1700000000008 (placement_readiness_scores view only)', VIEW_REQUIRES);
+    }
+
+    if (canBuildView) await queryRunner.query(`
       CREATE OR REPLACE VIEW placement_readiness_scores AS
       WITH
         cgpa_score AS (
