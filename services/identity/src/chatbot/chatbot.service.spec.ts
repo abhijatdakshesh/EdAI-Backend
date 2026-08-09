@@ -217,6 +217,29 @@ describe('ChatbotService', () => {
       expect(chunks.join('')).toBe('Recovered answer.');
     });
 
+    // gemini-3.5-flash-lite rejects thinkingConfig with a bare 400
+    // INVALID_ARGUMENT — no field name, no hint. The only way to distinguish it
+    // from a genuinely malformed request is to drop the config and retry.
+    it('retries the same model without thinkingConfig on INVALID_ARGUMENT', async () => {
+      mockQuery.mockResolvedValue([]);
+
+      mockGenerateContentStream
+        .mockImplementationOnce(() =>
+          Promise.reject(new Error('{"error":{"code":400,"status":"INVALID_ARGUMENT"}}')),
+        )
+        .mockImplementationOnce(() => makeGeminiStream(['Answered ', 'anyway.']));
+
+      const result = await svc.chatStream('conv-1', 'Hello', studentGraph, () => undefined);
+
+      expect(result).toBe('Answered anyway.');
+      expect(mockGenerateContentStream).toHaveBeenCalledTimes(2);
+      // First call sends thinkingConfig, the retry omits it — same model both times.
+      const [first, second] = mockGenerateContentStream.mock.calls;
+      expect(first[0].model).toBe(second[0].model);
+      expect(first[0].config.thinkingConfig).toBeDefined();
+      expect(second[0].config.thinkingConfig).toBeUndefined();
+    });
+
     it('does not retry when the failure is neither transient nor model-specific', async () => {
       mockQuery.mockResolvedValue([]);
       mockGenerateContentStream.mockImplementationOnce(() =>

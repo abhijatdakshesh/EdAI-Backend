@@ -78,32 +78,61 @@ export function modelChain(preferred: string): string[] {
 }
 
 /**
+ * Not every model accepts thinkingConfig. gemini-3.5-flash-lite rejects
+ * `thinkingBudget: 0` with a bare 400 INVALID_ARGUMENT — no field name, no
+ * hint — so the only way to tell it apart from a genuinely malformed request is
+ * to drop the config and see whether the same call then succeeds.
+ */
+export function isInvalidArgumentError(err: unknown): boolean {
+  const m = errText(err);
+  return m.includes('INVALID_ARGUMENT') || m.includes('"code":400') || m.includes('code: 400');
+}
+
+/**
  * Run `attempt` against each model in the chain, retrying transient failures
  * with backoff before moving on. Shared by streaming and non-streaming callers
  * so both degrade identically.
+ *
+ * `thinking` tells the callback whether to send thinkingConfig. It starts true
+ * and is retried once as false per model, so a model that rejects the field
+ * still answers instead of failing the whole request.
  */
 export async function withGeminiRetry<T>(
   preferred: string,
-  attempt: (model: string) => Promise<T>,
+  attempt: (model: string, thinking: boolean) => Promise<T>,
 ): Promise<T> {
   let lastErr: unknown;
 
   for (const model of modelChain(preferred)) {
-    for (let i = 0; i < MAX_ATTEMPTS_PER_MODEL; i++) {
-      try {
-        return await attempt(model);
-      } catch (err) {
-        lastErr = err;
-        if (isRetryableError(err) && i < MAX_ATTEMPTS_PER_MODEL - 1) {
-          await sleep(backoffMs(err, i));
-          continue;
+    // Each model gets two configurations: with thinkingConfig, then without.
+    // The second pass only runs if the first was rejected as INVALID_ARGUMENT.
+    for (const thinking of [true, false]) {
+      let rejectedConfig = false;
+
+      for (let i = 0; i < MAX_ATTEMPTS_PER_MODEL; i++) {
+        try {
+          return await attempt(model, thinking);
+        } catch (err) {
+          lastErr = err;
+
+          if (isRetryableError(err) && i < MAX_ATTEMPTS_PER_MODEL - 1) {
+            await sleep(backoffMs(err, i));
+            continue;
+          }
+          if (thinking && isInvalidArgumentError(err)) rejectedConfig = true;
+          break;
         }
-        // Not retryable on this model: try the next one if the failure is
-        // model-specific, otherwise give up — a malformed prompt or a genuine
-        // outage fails identically everywhere.
-        if (isModelUnavailableError(err) || isRetryableError(err)) break;
-        throw err;
       }
+
+      // Retry the same model without thinkingConfig.
+      if (rejectedConfig) continue;
+
+      // Model-specific failure or exhausted retries: move to the next model.
+      // Anything else — a malformed prompt, a genuine outage — fails the same
+      // way everywhere, so stop rather than burn quota on the whole chain.
+      if (isModelUnavailableError(lastErr) || isRetryableError(lastErr) ||
+          isInvalidArgumentError(lastErr)) break;
+      throw lastErr;
     }
   }
 
@@ -115,7 +144,7 @@ export async function geminiGenerate(
   model: string = GEMINI_SMART,
   maxTokens = 2048,
 ): Promise<string> {
-  return withGeminiRetry(model, async (candidate) => {
+  return withGeminiRetry(model, async (candidate, thinking) => {
     const res = await getGeminiClient().models.generateContent({
       model: candidate,
       contents: prompt,
@@ -124,7 +153,12 @@ export async function geminiGenerate(
       // Callers here pass small budgets (voice turns use 80), so a single long
       // think returns an empty string and the caller silently degrades: dead air
       // on a call, or a blank AI reply.
-      config: { thinkingConfig: { thinkingBudget: 0 }, maxOutputTokens: maxTokens },
+      //
+      // `thinking` is false on the retry after a model rejects the field.
+      config: {
+        ...(thinking ? { thinkingConfig: { thinkingBudget: 0 } } : {}),
+        maxOutputTokens: maxTokens,
+      },
     });
     return res.text ?? '';
   });

@@ -123,7 +123,7 @@ ${JSON.stringify(graph, null, 2)}`;
     let emitted = false;
 
     try {
-      const { text, tokens, model } = await withGeminiRetry(selectedModel, async (candidate) => {
+      const { text, tokens, model } = await withGeminiRetry(selectedModel, async (candidate, thinking) => {
         if (emitted) throw new Error('Gemini stream already partially delivered — not retrying');
 
         const stream = await this.gemini.models.generateContentStream({
@@ -139,7 +139,9 @@ ${JSON.stringify(graph, null, 2)}`;
             //
             // Every answer here is extracted from the knowledge graph in the
             // system prompt, so there is nothing to reason about.
-            thinkingConfig: { thinkingBudget: 0 },
+            // `thinking` is false on the retry after a model rejects the
+            // field — gemini-3.5-flash-lite returns a bare 400 for it.
+            ...(thinking ? { thinkingConfig: { thinkingBudget: 0 } } : {}),
             maxOutputTokens: 2048,
             systemInstruction,
           },
