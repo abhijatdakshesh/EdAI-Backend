@@ -8,6 +8,7 @@ import { EventsModule } from '../events/events.module';
 import { StudentPortalModule } from '../student-portal/student-portal.module';
 import { ChatbotModule } from '../chatbot/chatbot.module';
 import { AiCallLogEntity, AnnouncementEntity } from '../entities/comms.entity';
+import { assertRegistered } from '../entities/registry';
 
 @Module({
   imports: [
@@ -15,7 +16,7 @@ import { AiCallLogEntity, AnnouncementEntity } from '../entities/comms.entity';
     forwardRef(() => StudentPortalModule),
     ChatbotModule,
     ...(process.env['DATABASE_URL']
-      ? [TypeOrmModule.forFeature([AiCallLogEntity, AnnouncementEntity])]
+      ? [TypeOrmModule.forFeature(assertRegistered([AiCallLogEntity, AnnouncementEntity]))]
       : []),
   ],
   controllers: [PublicCommsController, AudioController, CommsController],

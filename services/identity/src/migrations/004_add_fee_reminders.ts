@@ -1,7 +1,14 @@
 import { MigrationInterface, QueryRunner } from 'typeorm';
+import { hasTables, skip } from './_guards';
 
 export class AddFeeReminders1700000000004 implements MigrationInterface {
   public async up(queryRunner: QueryRunner): Promise<void> {
+    // The guard covers ONLY the fee_risk_scores view further down, which reads
+    // fee_payments. fee_reminders itself is owned by this service and must be
+    // created either way — an earlier version of this guard sat at the top of
+    // the method and skipped the whole migration, so the table silently never
+    // existed on a database without the finance read-model.
+
     // Tracks every reminder sent — prevents double-sending and gives NAAC audit trail
     await queryRunner.query(`
       CREATE TABLE IF NOT EXISTS fee_reminders (
@@ -29,7 +36,15 @@ export class AddFeeReminders1700000000004 implements MigrationInterface {
         WHERE status != 'FAILED';
     `);
 
-    // View: fee risk scores — runs live, no caching needed at this scale
+    // View: fee risk scores — runs live, no caching needed at this scale.
+    // Reads fee_payments, which belongs to the finance service, so it is skipped
+    // where that read-model is absent. The table above is unaffected.
+    const VIEW_REQUIRES = ['fee_payments', 'students'];
+    if (!(await hasTables(queryRunner, VIEW_REQUIRES))) {
+      skip('AddFeeReminders1700000000004 (fee_risk_scores view only)', VIEW_REQUIRES);
+      return;
+    }
+
     await queryRunner.query(`
       CREATE OR REPLACE VIEW fee_risk_scores AS
       WITH

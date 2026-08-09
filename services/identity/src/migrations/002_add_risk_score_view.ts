@@ -1,8 +1,14 @@
 import { MigrationInterface, QueryRunner } from 'typeorm';
+import { hasTables, skip } from './_guards';
 
 export class AddRiskScoreView1700000000001 implements MigrationInterface {
 
   public async up(queryRunner: QueryRunner): Promise<void> {
+    const REQUIRES = ['attendance', 'internal_marks', 'fee_payments', 'students'];
+    if (!(await hasTables(queryRunner, REQUIRES))) {
+      skip('AddRiskScoreView1700000000001', REQUIRES);
+      return;
+    }
     await queryRunner.query(`
       CREATE OR REPLACE VIEW student_risk_scores AS
       WITH

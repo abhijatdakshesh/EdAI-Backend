@@ -155,7 +155,7 @@ export class LmsController {
       }
     }
     const prog = await this.svc.recordCheckpoint(collegeId, usn, lessonId, score, total);
-    const streak = this.ext.touchStreak(collegeId, usn);
+    const streak = await this.ext.touchStreak(collegeId, usn);
     const courseId = await this.svc.getLessonCourseId(collegeId, lessonId);
     const abc = await this.ext.tryAwardModuleAbc(collegeId, usn, courseId, lesson.moduleId);
     return { score, total, state: prog.state, explanations, streak, abcAward: abc };
