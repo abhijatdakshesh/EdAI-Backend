@@ -5,7 +5,11 @@ import type { StudentKnowledgeGraph } from './knowledge-graph.service';
 
 const mockGenerateContentStream = jest.fn();
 
+// Only the client is mocked. modelChain / withGeminiRetry / the error
+// classifiers are the real implementations, so these tests exercise the actual
+// fallback and retry control flow rather than a stub of it.
 jest.mock('../shared/gemini-ai', () => ({
+  ...jest.requireActual('../shared/gemini-ai'),
   getGeminiClient: jest.fn(() => ({ models: { generateContentStream: mockGenerateContentStream } })),
   GEMINI_FAST: 'gemini-2.5-flash',
   GEMINI_SMART: 'gemini-2.5-pro',
@@ -186,6 +190,43 @@ describe('ChatbotService', () => {
       const chunks: string[] = [];
       const result = await svc.chatStream('conv-1', 'Hi', studentGraph, (c) => chunks.push(c));
       expect(result).toContain('trouble');
+    });
+
+    // Regression: models can be entirely unavailable on a given API key —
+    // gemini-2.5-pro returns a free-tier `limit: 0`, and a fresh project gets
+    // 404 "no longer available to new users" for gemini-2.5-flash. Every turn
+    // routed to such a model died with "I'm having trouble right now" while the
+    // path pinned to a working model kept answering, which made it look random.
+    it('falls back to the next model when the first is unavailable', async () => {
+      mockQuery.mockResolvedValue([]);
+
+      mockGenerateContentStream
+        .mockImplementationOnce(() =>
+          Promise.reject(new Error('404 NOT_FOUND: model no longer available to new users')),
+        )
+        .mockImplementationOnce(() => makeGeminiStream(['Recovered ', 'answer.']));
+
+      const chunks: string[] = [];
+      // "Hello" matches no SIMPLE_PATTERN, so it routes to GEMINI_SMART first.
+      const result = await svc.chatStream('conv-1', 'Hello', studentGraph, (c) => chunks.push(c));
+
+      expect(result).toBe('Recovered answer.');
+      expect(result).not.toContain('trouble');
+      expect(mockGenerateContentStream).toHaveBeenCalledTimes(2);
+      // The dead attempt contributed nothing to what the user saw.
+      expect(chunks.join('')).toBe('Recovered answer.');
+    });
+
+    it('does not retry when the failure is neither transient nor model-specific', async () => {
+      mockQuery.mockResolvedValue([]);
+      mockGenerateContentStream.mockImplementationOnce(() =>
+        Promise.reject(new Error('Malformed request')),
+      );
+
+      const result = await svc.chatStream('conv-1', 'Hello', studentGraph, () => undefined);
+
+      expect(result).toContain('trouble');
+      expect(mockGenerateContentStream).toHaveBeenCalledTimes(1);
     });
 
     it('uses conversation history from DB with model role', async () => {
