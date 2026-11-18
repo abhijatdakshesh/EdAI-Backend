@@ -1,38 +1,17 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule, getDataSourceToken } from '@nestjs/typeorm';
 import { SnakeNamingStrategy } from './snake-naming.strategy';
-import { FeeItemEntity } from '../entities/fee-item.entity';
-import { PromotionBatchEntity, PromotionAuditEntity } from '../entities/promotion-batch.entity';
-import { VtuWindowEntity, VtuEligibilityEntity, VtuRegistrationEntity } from '../entities/vtu.entity';
-import { AiCallLogEntity, ConsentRecordEntity, AnnouncementEntity } from '../entities/comms.entity';
-import { StudentEntity, ParentStudentLinkEntity } from '../entities/student-orm.entity';
-import { AlumniOutcomeEntity } from '../entities/placement.entity';
-import { ModuleEntity, LessonEntity, LessonProgressEntity, TopicMasteryEntity } from '../entities/lms.entity';
-
-const ALL_ENTITIES = [
-  StudentEntity,
-  ParentStudentLinkEntity,
-  FeeItemEntity,
-  PromotionBatchEntity,
-  PromotionAuditEntity,
-  VtuWindowEntity,
-  VtuEligibilityEntity,
-  VtuRegistrationEntity,
-  AiCallLogEntity,
-  ConsentRecordEntity,
-  AnnouncementEntity,
-  AlumniOutcomeEntity,
-  // LMS
-  ModuleEntity,
-  LessonEntity,
-  LessonProgressEntity,
-  TopicMasteryEntity,
-];
+import { DatabasePreflightService } from './database-preflight.service';
+import { ALL_ENTITIES } from '../entities/registry';
 
 /**
  * Conditionally connects to PostgreSQL when DATABASE_URL is set.
  * Falls back to no-op (in-memory services continue working) when DATABASE_URL is absent.
  * This allows tests to run without a running database.
+ *
+ * The entity list lives in `../entities/registry` and is shared with every
+ * feature module's forFeature() call and with migrations/run.ts. Do not inline
+ * an entity list here — see that file for why the three lists must not drift.
  */
 @Module({
   imports: process.env['DATABASE_URL']
@@ -57,8 +36,8 @@ const ALL_ENTITIES = [
   // When no DATABASE_URL, register a null DataSource so modules importing DatabaseModule
   // can inject DataSource (receiving null) without NestJS throwing a DI resolution error.
   providers: process.env['DATABASE_URL']
-    ? []
-    : [{ provide: getDataSourceToken(), useValue: null }],
+    ? [DatabasePreflightService]
+    : [{ provide: getDataSourceToken(), useValue: null }, DatabasePreflightService],
   exports: process.env['DATABASE_URL']
     ? [TypeOrmModule]
     : [getDataSourceToken()],

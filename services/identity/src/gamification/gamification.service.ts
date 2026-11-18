@@ -34,14 +34,18 @@ const DEMO_PEERS: Array<{ usn: string; name: string; streak: number; learningHou
 export class GamificationService {
   constructor(@Optional() private readonly ext?: LmsExtensionsService) {}
 
-  private stats(collegeId: string, usn: string, courseId: string): { streak: number; learningHours: number } {
-    const streak = this.ext?.getStreak(collegeId, usn)?.currentStreak ?? 0;
-    const learningHours = this.ext?.getLearningHours(usn, courseId) ?? 0;
+  private async stats(
+    collegeId: string,
+    usn: string,
+    courseId: string,
+  ): Promise<{ streak: number; learningHours: number }> {
+    const streak = (await this.ext?.getStreak(collegeId, usn))?.currentStreak ?? 0;
+    const learningHours = (await this.ext?.getLearningHours(usn, courseId)) ?? 0;
     return { streak, learningHours };
   }
 
-  getProfile(collegeId: string, usn: string, courseId: string): GamificationProfile {
-    const s = this.stats(collegeId, usn, courseId);
+  async getProfile(collegeId: string, usn: string, courseId: string): Promise<GamificationProfile> {
+    const s = await this.stats(collegeId, usn, courseId);
     const badges: Badge[] = BADGE_CATALOG.map((b) => ({
       code: b.code, title: b.title, icon: b.icon, description: b.description, earned: b.test(s),
     }));
@@ -53,8 +57,8 @@ export class GamificationService {
     };
   }
 
-  getLeaderboard(collegeId: string, usn: string, courseId: string): LeaderboardRow[] {
-    const me = this.stats(collegeId, usn, courseId);
+  async getLeaderboard(collegeId: string, usn: string, courseId: string): Promise<LeaderboardRow[]> {
+    const me = await this.stats(collegeId, usn, courseId);
     const rows = [
       ...DEMO_PEERS.map((p) => ({ usn: p.usn, name: p.name, points: pointsFor(p.streak, p.learningHours), streak: p.streak, isMe: false })),
       { usn: usn || 'me', name: 'You', points: pointsFor(me.streak, me.learningHours), streak: me.streak, isMe: true },

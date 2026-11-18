@@ -1,0 +1,9 @@
+# Generated credentials for the deployment. Never committed.
+# Regenerating them means rotating the DB password and invalidating sessions,
+# so keep this file — it is the only copy outside Azure.
+.secrets.env
+
+# Bicep build artefacts
+*.json
+!*.parameters.example.json
+bicep.err

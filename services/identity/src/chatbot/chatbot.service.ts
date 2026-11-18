@@ -2,7 +2,7 @@
 // All calls include a DPDP consent check; minimal PII is included in prompts.
 
 import { Injectable, Logger, Optional } from '@nestjs/common';
-import { getGeminiClient, GEMINI_FAST, GEMINI_SMART } from '../shared/gemini-ai';
+import { getGeminiClient, GEMINI_FAST, GEMINI_SMART, modelChain, withGeminiRetry } from '../shared/gemini-ai';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
 import { KnowledgeGraph, StudentKnowledgeGraph, ParentKnowledgeGraph, TeacherKnowledgeGraph, AdminKnowledgeGraph, RecruiterKnowledgeGraph } from './knowledge-graph.service';
@@ -110,28 +110,70 @@ ${JSON.stringify(graph, null, 2)}`;
 
     const systemInstruction = this.buildSystemPrompt(graph);
 
+    // withGeminiRetry walks the model chain and retries transient 429/503 with
+    // backoff, so neither a rate limit nor one model's zero allowance takes chat
+    // down. Free-tier keys throttle after a handful of calls in a minute.
+    let modelUsed = selectedModel;
+
+    // Chunks are forwarded to the client as they arrive, so once the first one
+    // is out we are committed to that attempt: a retry would append a second
+    // answer to a half-written one. Failures before any output are still safe
+    // to retry, which covers the 429s and model-unavailable errors that this
+    // was built for — those come back from the initial call, not mid-stream.
+    let emitted = false;
+
     try {
-      const stream = await this.gemini.models.generateContentStream({
-        model: selectedModel,
-        contents: geminiContents,
-        config: {
-          maxOutputTokens: 1024,
-          systemInstruction,
-        },
+      const { text, tokens, model } = await withGeminiRetry(selectedModel, async (candidate, thinking) => {
+        if (emitted) throw new Error('Gemini stream already partially delivered — not retrying');
+
+        const stream = await this.gemini.models.generateContentStream({
+          model: candidate,
+          contents: geminiContents,
+          config: {
+            // Gemini charges "thinking" tokens against maxOutputTokens, and the
+            // amount is unpredictable — 702 thinking tokens for a 7-token answer
+            // was measured, versus 32 for a far larger prompt. At the previous
+            // 1024 cap a long think left nothing for the reply, so the model
+            // returned STOP with no text parts and the user saw "I'm having
+            // trouble right now" on some turns and a correct answer on others.
+            //
+            // Every answer here is extracted from the knowledge graph in the
+            // system prompt, so there is nothing to reason about.
+            // `thinking` is false on the retry after a model rejects the
+            // field — gemini-3.5-flash-lite returns a bare 400 for it.
+            ...(thinking ? { thinkingConfig: { thinkingBudget: 0 } } : {}),
+            maxOutputTokens: 2048,
+            systemInstruction,
+          },
+        });
+
+        let buffered = '';
+        let lastUsage: { promptTokenCount?: number; candidatesTokenCount?: number } | undefined;
+        for await (const chunk of stream) {
+          const text = chunk.text ?? '';
+          if (text) {
+            buffered += text;
+            emitted = true;
+            onChunk(text);
+          }
+          if (chunk.usageMetadata) lastUsage = chunk.usageMetadata;
+        }
+
+        return {
+          text: buffered,
+          tokens: (lastUsage?.promptTokenCount ?? 0) + (lastUsage?.candidatesTokenCount ?? 0),
+          model: candidate,
+        };
       });
 
-      let lastUsage: { promptTokenCount?: number; candidatesTokenCount?: number } | undefined;
-      for await (const chunk of stream) {
-        const text = chunk.text ?? '';
-        if (text) {
-          fullText += text;
-          onChunk(text);
-        }
-        if (chunk.usageMetadata) lastUsage = chunk.usageMetadata;
+      if (model !== selectedModel) {
+        this.logger.warn(`Gemini fell back from ${selectedModel} to ${model}`);
       }
-      tokensUsed = (lastUsage?.promptTokenCount ?? 0) + (lastUsage?.candidatesTokenCount ?? 0);
+      fullText = text;
+      tokensUsed = tokens;
+      modelUsed = model;
     } catch (err) {
-      this.logger.error('Gemini chat error', err);
+      this.logger.error(`Gemini chat error (tried ${modelChain(selectedModel).join(', ')})`, err);
       fullText = "I'm having trouble right now. Please try again in a moment.";
       onChunk(fullText);
     }
@@ -142,7 +184,7 @@ ${JSON.stringify(graph, null, 2)}`;
       await this.db.query(
         `INSERT INTO chat_messages (conversation_id, role, content, tokens_used, model_used)
          VALUES ($1, 'ASSISTANT', $2, $3, $4)`,
-        [conversationId, fullText, tokensUsed, selectedModel],
+        [conversationId, fullText, tokensUsed, modelUsed],
       ).catch(() => undefined);
 
       await this.db.query(
@@ -262,7 +304,10 @@ STYLE:
       const res = await this.gemini.models.generateContent({
         model: GEMINI_FAST,
         contents: userMessage,
-        config: { maxOutputTokens: 512, systemInstruction },
+        // thinkingBudget 0 for the same reason as chatStream: thinking tokens
+        // come out of maxOutputTokens, and 512 is small enough that a single
+        // long think returns an empty answer.
+        config: { thinkingConfig: { thinkingBudget: 0 }, maxOutputTokens: 512, systemInstruction },
       });
       return (res.text ?? '').trim() || "I'm not sure about that. Please visit https://rvce.edu.in for details.";
     } catch (err) {

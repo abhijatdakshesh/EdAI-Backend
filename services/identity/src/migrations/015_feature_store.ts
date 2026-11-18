@@ -1,4 +1,5 @@
 import { MigrationInterface, QueryRunner } from 'typeorm';
+import { hasTables, skip } from './_guards';
 
 /**
  * Phase 0 — Shared Feature Store.
@@ -18,6 +19,11 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  */
 export class AddFeatureStore1700000000015 implements MigrationInterface {
   public async up(queryRunner: QueryRunner): Promise<void> {
+    const REQUIRES = ['attendance', 'internal_marks', 'fee_payments', 'students'];
+    if (!(await hasTables(queryRunner, REQUIRES))) {
+      skip('AddFeatureStore1700000000015', REQUIRES);
+      return;
+    }
     await queryRunner.query(`
       CREATE OR REPLACE VIEW student_feature_snapshots AS
       WITH

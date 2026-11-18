@@ -5,12 +5,15 @@ import { VtuService } from './vtu.service';
 import { VtuNotificationsService } from './vtu-notifications.service';
 import { EventsModule } from '../events/events.module';
 import { VtuWindowEntity, VtuEligibilityEntity, VtuRegistrationEntity } from '../entities/vtu.entity';
+import { assertRegistered } from '../entities/registry';
 
 @Module({
   imports: [
     EventsModule,
     ...(process.env['DATABASE_URL']
-      ? [TypeOrmModule.forFeature([VtuWindowEntity, VtuEligibilityEntity, VtuRegistrationEntity])]
+      ? [TypeOrmModule.forFeature(
+          assertRegistered([VtuWindowEntity, VtuEligibilityEntity, VtuRegistrationEntity]),
+        )]
       : []),
   ],
   controllers: [VtuController],
